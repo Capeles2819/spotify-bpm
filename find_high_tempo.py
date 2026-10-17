@@ -79,20 +79,40 @@ def clean_title(name):
 
 _bpm_cache = {}
 
+# Running / cycling cadence range. GetSongBPM often reports half-time
+# (e.g. 92 for a song that feels like 184), so we fold into this window.
+TEMPO_MIN, TEMPO_MAX = 120, 200
 
-def lookup_bpm(bpm_session, title, artist):
-    """Return (tempo, matched_title) from GetSongBPM, or (None, reason)."""
-    key = os.environ.get("GETSONGBPM_API_KEY")
-    if not key:
-        return None, "no key"
-    cache_key = (title.lower(), artist.lower())
-    if cache_key in _bpm_cache:
-        return _bpm_cache[cache_key]
+
+def normalize_tempo(raw):
+    """Return (normalized_bpm, raw_bpm) with raw doubled/halved into 120-200."""
+    try:
+        t = float(raw)
+    except (TypeError, ValueError):
+        return None, None
+    if t <= 0:
+        return None, None
+    raw_int = round(t)
+    while t < TEMPO_MIN and t * 2 <= TEMPO_MAX:
+        t *= 2
+    while t > TEMPO_MAX and t / 2 >= TEMPO_MIN:
+        t /= 2
+    return round(t), raw_int
+
+
+def _artist_matches(hit, artists):
+    name = ((hit.get("artist") or {}).get("name") or "").lower()
+    if not name:
+        return False
+    return any(a.lower() in name or name in a.lower() for a in artists)
+
+
+def _bpm_query(bpm_session, key, search_type, lookup):
+    """One GetSongBPM search; returns (hits, error_message)."""
     try:
         r = bpm_session.get(
             BPM_API,
-            params={"api_key": key, "type": "both",
-                    "lookup": f"song:{clean_title(title)} artist:{artist}", "limit": 3},
+            params={"api_key": key, "type": search_type, "lookup": lookup, "limit": 5},
             timeout=15,
         )
         data = r.json()
@@ -101,11 +121,47 @@ def lookup_bpm(bpm_session, title, artist):
     if isinstance(data, dict) and data.get("error"):
         return None, data["error"]
     hits = data.get("search") if isinstance(data, dict) else None
-    if not hits or not isinstance(hits, list):
-        result = (None, "no match")
+    return (hits if isinstance(hits, list) else []), None
+
+
+def lookup_bpm(bpm_session, title, artists):
+    """Return (tempo, note) from GetSongBPM, or (None, reason).
+
+    Strategy:
+      1. song+artist lookup for each credited artist (first two)
+      2. title-only lookup, accepting a hit only if its artist matches
+    """
+    key = os.environ.get("GETSONGBPM_API_KEY")
+    if not key:
+        return None, "no key"
+    cache_key = (title.lower(), tuple(a.lower() for a in artists))
+    if cache_key in _bpm_cache:
+        return _bpm_cache[cache_key]
+
+    clean = clean_title(title)
+    chosen, how = None, None
+
+    for artist in artists[:2]:
+        hits, err = _bpm_query(bpm_session, key, "both", f"song:{clean} artist:{artist}")
+        if err:
+            return None, err
+        if hits:
+            chosen, how = hits[0], "match"
+            break
+
+    if chosen is None:
+        hits, err = _bpm_query(bpm_session, key, "song", clean)
+        if err:
+            return None, err
+        for h in hits:
+            if _artist_matches(h, artists):
+                chosen, how = h, "title-fallback"
+                break
+
+    if chosen is None:
+        result = (None, "not in GetSongBPM")
     else:
-        h = hits[0]
-        result = (h.get("tempo"), h.get("title"))
+        result = (chosen.get("tempo"), how)
     _bpm_cache[cache_key] = result
     return result
 
@@ -139,8 +195,17 @@ def main():
                 artists = ", ".join(a["name"] for a in t["artists"])
                 line = f"     - {t['name']}  -  {artists}  (pop {t['popularity']})"
                 if have_bpm_key:
-                    tempo, note = lookup_bpm(bpm_session, t["name"], t["artists"][0]["name"])
-                    line += f"  [{tempo} BPM]" if tempo else f"  [bpm: {note}]"
+                    raw, note = lookup_bpm(bpm_session, t["name"], [a["name"] for a in t["artists"]])
+                    bpm, raw_int = normalize_tempo(raw)
+                    if bpm is None:
+                        line += f"  [bpm: {note}]"
+                    else:
+                        tag = f"{bpm} BPM"
+                        if raw_int != bpm:
+                            tag += f" (listed {raw_int})"
+                        if note == "title-fallback":
+                            tag += " ~"
+                        line += f"  [{tag}]"
                 print(line)
                 first_track_id = first_track_id or t["id"]
 
