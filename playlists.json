@@ -1,0 +1,44 @@
+{
+  "_comment": "Playlists kept topped up by refresh_playlists.py. 'target' is the size to maintain. Tracks you delete are remembered in state.json and never re-added.",
+  "playlists": [
+    {
+      "id": "5j12UtfcHpEjXRLBGTLLTv",
+      "name": "Techno Night Drive (auto)",
+      "mode": "like",
+      "reference": "37i9dQZF1EQvUtXaHaHpw2",
+      "genres": "techno,hard,rave,edm,big room,electro,trance,bass house,tech house",
+      "filter_seeds": false,
+      "per_artist": 3,
+      "target": 150
+    },
+    {
+      "id": "5KBJySxB0qI0k2RJy9yg7D",
+      "name": "House Waymo Style (auto)",
+      "mode": "like",
+      "reference": "1ywfUaEJoFDo0sSYlxojbE",
+      "genres": "house,disco,garage,electronic,edm,techno",
+      "filter_seeds": true,
+      "per_artist": 3,
+      "target": 150
+    },
+    {
+      "id": "2xM9PwnIHFkCXbdkLWI906",
+      "name": "Smooth Jazz (auto)",
+      "mode": "like",
+      "reference": "29uiOXIxJNOejWUGPYCHHc",
+      "genres": "smooth jazz,jazz",
+      "filter_seeds": true,
+      "per_artist": 3,
+      "target": 150
+    },
+    {
+      "id": "0CIWrvoFBxBOqRPrdrtr2Q",
+      "name": "170-190 BPM (auto)",
+      "mode": "bpm",
+      "min": 170,
+      "max": 190,
+      "queries": ["180 bpm running", "175 bpm running", "170 bpm running", "high tempo workout", "fast running songs"],
+      "target": 113
+    }
+  ]
+}

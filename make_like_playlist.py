@@ -147,6 +147,83 @@ def write_playlist(session, into, name, description, uris):
     return r.json()
 
 
+def build_candidates(session, ref_id, words, *, filter_seeds=False, per_artist=3, max_n=150,
+                     exclude_ids=frozenset(), exclude_keys=frozenset(), log=print):
+    """Return (reference_name, tracks, seed_count) for a playlist that sounds like ref_id.
+
+    words        genre keywords; empty list disables the genre filter
+    exclude_ids  track ids never to return (already in playlist, or rejected)
+    exclude_keys dedupe keys (see dedupe_key) never to return
+    """
+    use_genres = bool(words)
+    ref_name, seeds = reference_tracks_api(session, ref_id)
+    if seeds is None:
+        log("API refused the reference playlist; reading its public embed page instead.")
+        ref_name, seeds = reference_tracks_embed(ref_id)
+    seeds = hydrate_tracks(session, seeds)
+    log(f"Reference: '{ref_name}' with {len(seeds)} usable tracks")
+
+    genres = {}
+    if use_genres:
+        genres = artist_genres(session, {a["id"] for t in seeds for a in t["artists"]})
+
+    if filter_seeds and use_genres:
+        kept = [t for t in seeds if genre_ok(t, genres, words)]
+        dropped = [t for t in seeds if t not in kept]
+        log(f"Seed genre filter: kept {len(kept)}, dropped {len(dropped)}")
+        for t in dropped:
+            log(f"  - {t['name']}  -  {', '.join(a['name'] for a in t['artists'])}")
+        seeds = kept
+
+    artists = OrderedDict()
+    for t in seeds:
+        for a in t["artists"]:
+            artists.setdefault(a["id"], a["name"])
+    log(f"{len(artists)} artists to expand through")
+
+    chosen, seen_ids, seen_keys = [], set(exclude_ids), set(exclude_keys)
+
+    def add(t, why):
+        if t["id"] in seen_ids or dedupe_key(t) in seen_keys:
+            return False
+        seen_ids.add(t["id"]); seen_keys.add(dedupe_key(t))
+        chosen.append(t)
+        log(f"  + {t['name']}  -  {', '.join(a['name'] for a in t['artists'])}   [{why}]")
+        return True
+
+    log("\nSeeds:")
+    n_seed_added = 0
+    for t in seeds:
+        if len(chosen) >= max_n:
+            break
+        n_seed_added += add(t, "seed")
+
+    log("\nExpansion (artist top tracks, round-robin so every artist gets a turn):")
+    skipped = 0
+    pools = {aid: top_tracks(session, aid, min(per_artist, 10)) for aid in artists}
+    if use_genres:
+        unknown = {a["id"] for pool in pools.values() for t in pool for a in t["artists"]} - set(genres)
+        if unknown:
+            genres.update(artist_genres(session, unknown))
+    for rnd in range(per_artist):
+        if len(chosen) >= max_n:
+            break
+        for aid, aname in artists.items():
+            if len(chosen) >= max_n:
+                break
+            # take the next not-yet-used, genre-approved track from this artist's pool
+            while pools[aid]:
+                t = pools[aid].pop(0)
+                if use_genres and not genre_ok(t, genres, words):
+                    skipped += 1
+                    continue
+                if add(t, f"top of {aname}, pass {rnd + 1}"):
+                    break
+
+    log(f"\n{len(chosen)} tracks selected ({n_seed_added} seeds), {skipped} skipped by genre filter")
+    return ref_name, chosen, n_seed_added
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("reference", help="reference playlist URL or id")
@@ -165,70 +242,11 @@ def main():
     session = requests.Session()
     session.headers["Authorization"] = f"Bearer {user_token()}"
 
-    ref_id = playlist_id_from(args.reference)
-    ref_name, seeds = reference_tracks_api(session, ref_id)
-    if seeds is None:
-        print("API refused the reference playlist; reading its public embed page instead.")
-        ref_name, seeds = reference_tracks_embed(ref_id)
-    seeds = hydrate_tracks(session, seeds)
-    print(f"Reference: '{ref_name}' with {len(seeds)} usable tracks")
+    words = [] if args.no_genre_filter else [w.strip().lower() for w in args.genres.split(",") if w.strip()]
+    ref_name, chosen, n_seeds = build_candidates(
+        session, playlist_id_from(args.reference), words,
+        filter_seeds=args.filter_seeds, per_artist=args.per_artist, max_n=args.max)
 
-    words = [w.strip().lower() for w in args.genres.split(",") if w.strip()]
-    genres = {}
-    if not args.no_genre_filter:
-        genres = artist_genres(session, {a["id"] for t in seeds for a in t["artists"]})
-
-    if args.filter_seeds and not args.no_genre_filter:
-        kept = [t for t in seeds if genre_ok(t, genres, words)]
-        dropped = [t for t in seeds if t not in kept]
-        print(f"Seed genre filter: kept {len(kept)}, dropped {len(dropped)}")
-        for t in dropped:
-            print(f"  - {t['name']}  -  {', '.join(a['name'] for a in t['artists'])}")
-        seeds = kept
-
-    artists = OrderedDict()
-    for t in seeds:
-        for a in t["artists"]:
-            artists.setdefault(a["id"], a["name"])
-    print(f"{len(artists)} artists to expand through")
-
-    chosen, seen_ids, seen_keys = [], set(), set()
-
-    def add(t, why):
-        if t["id"] in seen_ids or dedupe_key(t) in seen_keys:
-            return False
-        seen_ids.add(t["id"]); seen_keys.add(dedupe_key(t))
-        chosen.append(t)
-        print(f"  + {t['name']}  -  {', '.join(a['name'] for a in t['artists'])}   [{why}]")
-        return True
-
-    print("\nSeeds:")
-    for t in seeds:
-        add(t, "seed")
-
-    print("\nExpansion (artist top tracks, round-robin so every artist gets a turn):")
-    skipped = 0
-    pools = {aid: top_tracks(session, aid, min(args.per_artist, 10)) for aid in artists}
-    if not args.no_genre_filter:
-        unknown = {a["id"] for pool in pools.values() for t in pool for a in t["artists"]} - set(genres)
-        if unknown:
-            genres.update(artist_genres(session, unknown))
-    for rnd in range(args.per_artist):
-        if len(chosen) >= args.max:
-            break
-        for aid, aname in artists.items():
-            if len(chosen) >= args.max:
-                break
-            # take the next not-yet-used, genre-approved track from this artist's pool
-            while pools[aid]:
-                t = pools[aid].pop(0)
-                if not args.no_genre_filter and not genre_ok(t, genres, words):
-                    skipped += 1
-                    continue
-                if add(t, f"top of {aname}, pass {rnd + 1}"):
-                    break
-
-    print(f"\n{len(chosen)} tracks selected ({len(seeds)} seeds), {skipped} skipped by genre filter")
     if args.dry_run:
         print("Dry run; nothing written.")
         return
