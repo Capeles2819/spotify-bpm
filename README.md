@@ -114,6 +114,11 @@ cd ~/spotify-bpm && git pull && bash deploy/install_panel.sh
 ```
 
 Check it with `systemctl status spotify-panel` or `journalctl -u spotify-panel -n 50`.
+
+Note: once you save from the panel, the Pi's `playlists.json` differs from the
+copy in git. Treat the Pi as the source of truth from then on; to bring a
+change back to the PC, `scp` the file or commit it on the Pi. If `git pull` on
+the Pi complains about `playlists.json`, copy it aside first.
 To try the panel elsewhere without touching the real files:
 `PANEL_DIR=/path/to/copies PANEL_PORT=5061 python panel.py`.
 
