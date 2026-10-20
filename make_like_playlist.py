@@ -30,7 +30,7 @@ import requests
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from find_high_tempo import API, load_env  # noqa: E402
-from make_playlist import user_token  # noqa: E402
+from make_playlist import follow_playlist, user_token  # noqa: E402
 
 DEFAULT_GENRE_WORDS = "techno,hard,rave,edm,big room,electro,trance,bass house,tech house"
 
@@ -140,6 +140,7 @@ def write_playlist(session, into, name, description, uris):
                          json={"name": name, "description": description, "public": False}, timeout=15)
         r.raise_for_status()
         pid = r.json()["id"]
+        follow_playlist(session, pid, public=False)
         for i in range(0, len(uris), 100):
             session.post(f"{API}/playlists/{pid}/tracks", json={"uris": uris[i:i + 100]}, timeout=15).raise_for_status()
     r = session.get(f"{API}/playlists/{pid}", params={"fields": "name,external_urls,tracks.total"}, timeout=15)

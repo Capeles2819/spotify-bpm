@@ -181,6 +181,13 @@ def gather_tracks(session, bpm_session, queries, lo, hi, per_query=4, per_playli
 
 # ---------------------------------------------------------------- playlist
 
+def follow_playlist(session, playlist_id, public=False):
+    """Put the playlist in the owner's library. API-created playlists are owned but not
+    automatically followed, so they never show up in Your Library without this."""
+    r = session.put(f"{API}/playlists/{playlist_id}/followers", json={"public": public}, timeout=15)
+    return r.status_code == 200
+
+
 def create_playlist(session, name, description, public, track_ids):
     me = session.get(f"{API}/me", timeout=15)
     me.raise_for_status()
@@ -191,6 +198,7 @@ def create_playlist(session, name, description, public, track_ids):
     }, timeout=15)
     r.raise_for_status()
     pl = r.json()
+    follow_playlist(session, pl["id"], public)
 
     uris = [f"spotify:track:{i}" for i in track_ids]
     for i in range(0, len(uris), 100):
