@@ -28,6 +28,7 @@ python find_high_tempo.py "180 bpm running"
 | `make_playlist.py` | Creates a playlist on your profile from a BPM range. First run opens a browser login (needs redirect URI `http://127.0.0.1:8888/callback` in the Spotify app settings). |
 | `make_like_playlist.py` | Creates or refills a playlist that sounds like a reference playlist: its tracks plus each artist's top tracks, filtered by artist genre. |
 | `refresh_playlists.py` | Keeps the playlists in `playlists.json` topped up. Tracks you delete are remembered in `state.json` and never re-added. Runs from cron on the Pi. |
+| `panel.py` | Web panel on the Pi (port 5060) to edit `playlists.json`, run previews/refreshes, un-reject tracks and read the log. See [Web panel](#web-panel-on-the-pi). |
 
 ## Customizing
 
@@ -61,7 +62,8 @@ nano ~/spotify-bpm/playlists.json
 cd ~/spotify-bpm && python3 refresh_playlists.py --dry-run
 ```
 
-Or edit on the PC, commit, push, then `git pull` on the Pi.
+Or edit on the PC, commit, push, then `git pull` on the Pi. Or use the
+[web panel](#web-panel-on-the-pi) and skip the JSON entirely.
 
 ### Adding a new playlist
 
@@ -76,6 +78,44 @@ Copy the playlist ID from the printed URL into a new `playlists.json` entry.
 Genre words that match well: `drum and bass`, `melodic techno`, `tech house`,
 `afrobeats`, `reggaeton`, `lo-fi`, `chillhop`, `synthwave`, `indie rock`,
 `classic rock`, `r&b`, `neo soul`, `bossa nova`, `latin`.
+
+## Web panel (on the Pi)
+
+`panel.py` is a small Flask page for managing `playlists.json` without editing
+JSON. It runs on the Pi as the `spotify-panel` service and is reachable on the
+home LAN at <http://192.168.1.17:5060>.
+
+**There is no login.** Anyone on the LAN can use it, so never forward port 5060
+to the internet.
+
+What it does:
+
+- **Playlists** tab: one card per entry with editable name, reference (paste a
+  Spotify URL, it is normalised to the id), genres, filter seeds, per-artist and
+  target size (BPM entries show min, max and search queries instead). *Save*
+  validates and rewrites `playlists.json` atomically. *Preview* runs
+  `refresh_playlists.py --dry-run --only <id>` and shows the output; *Run now*
+  runs it for real; *Remove from refresher* deletes the entry only (the Spotify
+  playlist is untouched).
+- **Add playlist** tab: reference URL, name, genres and options. *Preview* runs
+  `make_like_playlist.py --dry-run`; *Create* makes the playlist on Spotify and
+  appends it to `playlists.json`.
+- **Rejected songs** tab: the tracks you removed (remembered in `state.json`),
+  with an *Un-reject* button so the refresher may add one back later.
+- **Log** tab: the last 200 lines of `refresh.log` and the runs history.
+
+Scripts run one at a time in the background; the page polls for their output.
+The cron refresh at 06:15 is unchanged and independent of the panel.
+
+Install or update the service on the Pi (installs `python3-flask` if needed):
+
+```bash
+cd ~/spotify-bpm && git pull && bash deploy/install_panel.sh
+```
+
+Check it with `systemctl status spotify-panel` or `journalctl -u spotify-panel -n 50`.
+To try the panel elsewhere without touching the real files:
+`PANEL_DIR=/path/to/copies PANEL_PORT=5061 python panel.py`.
 
 ## Credits
 

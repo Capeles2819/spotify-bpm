@@ -1,0 +1,20 @@
+# Web panel for playlists.json (http://<pi>:5060, home LAN only, no login).
+#
+# Install:   bash deploy/install_panel.sh
+# Check it:  systemctl status spotify-panel
+# Logs:      journalctl -u spotify-panel -n 50
+
+[Unit]
+Description=Spotify playlists web panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=piadmin
+WorkingDirectory=/home/piadmin/spotify-bpm
+ExecStart=/usr/bin/python3 panel.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
