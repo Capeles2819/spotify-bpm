@@ -1,4 +1,4 @@
-# Web panel for playlists.json (http://<pi>:5060, home LAN only, no login).
+# Web panel for playlists.json (http://<pi>:5070, home LAN only, no login).
 #
 # Install:   bash deploy/install_panel.sh
 # Check it:  systemctl status spotify-panel

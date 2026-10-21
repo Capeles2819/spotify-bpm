@@ -1,7 +1,7 @@
 """Web panel for managing playlists.json without editing JSON by hand.
 
 Runs on the Raspberry Pi as a systemd service (deploy/spotify-panel.service) and
-listens on http://0.0.0.0:5060 for the home LAN. There is no login: anyone on the
+listens on http://0.0.0.0:5070 for the home LAN (5060 is on Chrome's blocked-port list). There is no login: anyone on the
 LAN can use it, so do not expose the port to the internet.
 
 It only edits playlists.json / state.json and runs the existing scripts:
@@ -14,7 +14,7 @@ It only edits playlists.json / state.json and runs the existing scripts:
 One script runs at a time, in a background thread; the page polls for its output.
 
 Usage:
-    python3 panel.py                        # 0.0.0.0:5060
+    python3 panel.py                        # 0.0.0.0:5070
     PANEL_DIR=/tmp/test python3 panel.py    # use another folder's playlists.json/state.json/refresh.log
 """
 import datetime as dt
@@ -36,7 +36,7 @@ CONFIG_FILE = DATA_DIR / "playlists.json"
 STATE_FILE = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "refresh.log"
 HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
-PORT = int(os.environ.get("PANEL_PORT", "5060"))
+PORT = int(os.environ.get("PANEL_PORT", "5070"))
 
 ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
 URL_RE = re.compile(r"https://open\.spotify\.com/playlist/([A-Za-z0-9]{22})")

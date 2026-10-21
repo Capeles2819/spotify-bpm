@@ -28,7 +28,7 @@ python find_high_tempo.py "180 bpm running"
 | `make_playlist.py` | Creates a playlist on your profile from a BPM range. First run opens a browser login (needs redirect URI `http://127.0.0.1:8888/callback` in the Spotify app settings). |
 | `make_like_playlist.py` | Creates or refills a playlist that sounds like a reference playlist: its tracks plus each artist's top tracks, filtered by artist genre. |
 | `refresh_playlists.py` | Keeps the playlists in `playlists.json` topped up. Tracks you delete are remembered in `state.json` and never re-added. Runs from cron on the Pi. |
-| `panel.py` | Web panel on the Pi (port 5060) to edit `playlists.json`, run previews/refreshes, un-reject tracks and read the log. See [Web panel](#web-panel-on-the-pi). |
+| `panel.py` | Web panel on the Pi (port 5070) to edit `playlists.json`, run previews/refreshes, un-reject tracks and read the log. See [Web panel](#web-panel-on-the-pi). |
 
 ## Customizing
 
@@ -83,9 +83,9 @@ Genre words that match well: `drum and bass`, `melodic techno`, `tech house`,
 
 `panel.py` is a small Flask page for managing `playlists.json` without editing
 JSON. It runs on the Pi as the `spotify-panel` service and is reachable on the
-home LAN at <http://192.168.1.17:5060>.
+home LAN at <http://192.168.1.17:5070>.
 
-**There is no login.** Anyone on the LAN can use it, so never forward port 5060
+**There is no login.** Anyone on the LAN can use it, so never forward port 5070
 to the internet.
 
 What it does:

@@ -15,4 +15,4 @@ sudo systemctl enable spotify-panel
 sudo systemctl restart spotify-panel
 sleep 2
 systemctl --no-pager --lines=5 status spotify-panel || true
-echo "panel: http://$(hostname -I | awk '{print $1}'):5060"
+echo "panel: http://$(hostname -I | awk '{print $1}'):5070"
