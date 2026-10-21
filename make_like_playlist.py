@@ -17,10 +17,13 @@ Options:
                                    ANY genre containing one of these words (default below)
     --per-artist 5                 top tracks taken per artist (max 10)
     --max 120                      cap on total tracks
+    --max-seeds 150                big references are sampled down to this many seed
+                                   tracks (random, so every run draws a different set)
     --no-genre-filter              keep every top track regardless of genre
 """
 import argparse
 import json
+import random
 import re
 import sys
 from collections import OrderedDict
@@ -33,6 +36,7 @@ from find_high_tempo import API, load_env  # noqa: E402
 from make_playlist import follow_playlist, user_token  # noqa: E402
 
 DEFAULT_GENRE_WORDS = "techno,hard,rave,edm,big room,electro,trance,bass house,tech house"
+MAX_SEEDS = 150  # a reference bigger than this is randomly sampled down to this many seeds
 
 
 def playlist_id_from(arg):
@@ -43,11 +47,18 @@ def playlist_id_from(arg):
 # ------------------------------------------------------------ reference read
 
 def reference_tracks_api(session, pid):
-    r = session.get(f"{API}/playlists/{pid}/tracks", params={
-        "limit": 100, "fields": "items(track(id,name,artists(id,name))),next"}, timeout=15)
-    if r.status_code != 200:
-        return None, None
-    items = [it["track"] for it in r.json()["items"] if it.get("track") and it["track"].get("id")]
+    """Every track of the reference playlist (all pages), or (None, None) if the API refuses."""
+    items, url = [], f"{API}/playlists/{pid}/tracks"
+    params = {"limit": 100, "fields": "items(track(id,name,artists(id,name))),next"}
+    while url:
+        r = session.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            if not items:
+                return None, None
+            break  # keep what we have
+        body = r.json()
+        items += [it["track"] for it in body["items"] if it.get("track") and it["track"].get("id")]
+        url, params = body.get("next"), None
     name_r = session.get(f"{API}/playlists/{pid}", params={"fields": "name"}, timeout=15)
     return (name_r.json().get("name") if name_r.ok else pid), items
 
@@ -149,10 +160,13 @@ def write_playlist(session, into, name, description, uris):
 
 
 def build_candidates(session, ref_id, words, *, filter_seeds=False, per_artist=3, max_n=150,
-                     exclude_ids=frozenset(), exclude_keys=frozenset(), log=print):
+                     max_seeds=MAX_SEEDS, exclude_ids=frozenset(), exclude_keys=frozenset(), log=print):
     """Return (reference_name, tracks, seed_count) for a playlist that sounds like ref_id.
 
     words        genre keywords; empty list disables the genre filter
+    max_seeds    a reference with more tracks than this is randomly sampled down to it, so a
+                 huge grab-bag playlist is represented by a spread of its artists, not its
+                 first page; each run draws a fresh sample
     exclude_ids  track ids never to return (already in playlist, or rejected)
     exclude_keys dedupe keys (see dedupe_key) never to return
     """
@@ -161,8 +175,14 @@ def build_candidates(session, ref_id, words, *, filter_seeds=False, per_artist=3
     if seeds is None:
         log("API refused the reference playlist; reading its public embed page instead.")
         ref_name, seeds = reference_tracks_embed(ref_id)
+    total = len(seeds)
+    if max_seeds and total > max_seeds:
+        seeds = random.sample(seeds, max_seeds)
     seeds = hydrate_tracks(session, seeds)
-    log(f"Reference: '{ref_name}' with {len(seeds)} usable tracks")
+    if total > len(seeds):
+        log(f"Reference: '{ref_name}' has {total} tracks; using a random sample of {len(seeds)} as seeds")
+    else:
+        log(f"Reference: '{ref_name}' with {len(seeds)} usable tracks")
 
     genres = {}
     if use_genres:
@@ -233,6 +253,8 @@ def main():
     ap.add_argument("--genres", default=DEFAULT_GENRE_WORDS)
     ap.add_argument("--per-artist", type=int, default=5)
     ap.add_argument("--max", type=int, default=120)
+    ap.add_argument("--max-seeds", type=int, default=MAX_SEEDS,
+                    help="sample a big reference down to this many seed tracks (0 = use all)")
     ap.add_argument("--no-genre-filter", action="store_true")
     ap.add_argument("--filter-seeds", action="store_true",
                     help="also drop reference tracks that fail the genre filter (mixed-genre references)")
@@ -246,7 +268,8 @@ def main():
     words = [] if args.no_genre_filter else [w.strip().lower() for w in args.genres.split(",") if w.strip()]
     ref_name, chosen, n_seeds = build_candidates(
         session, playlist_id_from(args.reference), words,
-        filter_seeds=args.filter_seeds, per_artist=args.per_artist, max_n=args.max)
+        filter_seeds=args.filter_seeds, per_artist=args.per_artist, max_n=args.max,
+        max_seeds=args.max_seeds)
 
     if args.dry_run:
         print("Dry run; nothing written.")
