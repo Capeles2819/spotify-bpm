@@ -25,12 +25,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request
 
 from find_high_tempo import API, load_env  # noqa: E402
-from make_like_playlist import playlist_id_from, reference_tracks_embed  # noqa: E402
+from make_like_playlist import (  # noqa: E402
+    artist_genres, genre_ok, hydrate_tracks, playlist_id_from, reference_tracks_api, reference_tracks_embed)
 from make_playlist import TOKEN_FILE, _refresh  # noqa: E402
 
 import requests  # noqa: E402
@@ -248,10 +250,10 @@ def pl_summary(p):
 NAME_CACHE = {}
 
 
-def playlist_info(pid):
+def playlist_info(pid, fresh=False):
     """Name/owner/size for a playlist id. Spotify-made mixes 404 on the API, so fall back
-    to the public embed page (name + first ~50 tracks)."""
-    if pid in NAME_CACHE:
+    to the public embed page (name + first ~50 tracks). fresh=True skips the cache."""
+    if pid in NAME_CACHE and not fresh:
         return NAME_CACHE[pid]
     r = spotify().get(f"{API}/playlists/{pid}", params={"fields": "id,name,owner(display_name),tracks.total"}, timeout=15)
     if r.status_code == 200:
@@ -265,6 +267,30 @@ def playlist_info(pid):
             raise Invalid(f"playlist {pid} not found on Spotify (deleted or made private?)")
     NAME_CACHE[pid] = info
     return info
+
+
+def require_tracks(ref):
+    """Refuse a reference playlist with 0 tracks: make_like_playlist.py would happily build an
+    empty playlist and the refresher would then report '0 fresh candidates' on every run.
+    Size None (Spotify-made mix read from the embed page) is unknown and allowed.
+    Caller must not hold FILE_LOCK (access_token() takes it)."""
+    info = playlist_info(ref, fresh=True)
+    if info.get("tracks") == 0:
+        raise Invalid(f"reference playlist '{info['name']}' is empty; pick one that has tracks")
+    return info
+
+
+def reference_seeds(session, pid):
+    """The reference's tracks with artist ids, the way make_like_playlist reads them."""
+    name, seeds = reference_tracks_api(session, pid)
+    if seeds is None:
+        try:
+            name, seeds = reference_tracks_embed(pid)
+        except requests.RequestException:
+            raise
+        except (Exception, SystemExit):  # noqa: BLE001  (404 page -> KeyError; no JSON -> sys.exit)
+            raise Invalid(f"playlist {pid} not found on Spotify (deleted or made private?)")
+    return name, hydrate_tracks(session, seeds)
 
 
 # ---------------------------------------------------------------- API
@@ -324,6 +350,27 @@ def api_spotify_search():
     return ok(playlists=out, source=source)
 
 
+@app.get("/api/spotify/genres/<pid>")
+def api_spotify_genres(pid):
+    """How many of the reference's tracks each genre word (?words=a,b) would keep, plus the
+    15 most common genre tags among its artists. Catches dead words like 'chillhiphop'."""
+    if not ID_RE.match(pid):
+        raise Invalid("bad playlist id")
+    words = [w.strip().lower() for w in request.args.get("words", "").split(",") if w.strip()]
+    s = spotify()
+    name, seeds = reference_seeds(s, pid)
+    genres = artist_genres(s, {a["id"] for t in seeds for a in t["artists"]}) if seeds else {}
+    per_word = [{"word": w, "tracks": sum(1 for t in seeds if genre_ok(t, genres, [w]))} for w in words]
+    tag_tracks = Counter()
+    untagged = 0
+    for t in seeds:
+        tags = {g for a in t["artists"] for g in genres.get(a["id"], [])}
+        tag_tracks.update(tags)
+        untagged += not tags
+    top = [{"genre": g, "tracks": n} for g, n in tag_tracks.most_common(15)]
+    return ok(name=name, seeds=len(seeds), untagged=untagged, words=per_word, top=top)
+
+
 @app.get("/api/config")
 def api_config():
     with FILE_LOCK:
@@ -342,6 +389,13 @@ def api_config():
 @app.post("/api/playlists/<pid>")
 def api_save(pid):
     data = request.get_json(force=True, silent=True) or {}
+    with FILE_LOCK:
+        entry = find_entry(load_config(), pid)
+    if entry is None:
+        return fail("playlist not in playlists.json", 404)
+    # Fields first (on a throwaway copy), then the Spotify lookup outside FILE_LOCK, then write.
+    if apply_fields(entry, data).get("mode") == "like":
+        require_tracks(entry["reference"])
     with FILE_LOCK:
         cfg = load_config()
         entry = find_entry(cfg, pid)
@@ -385,6 +439,7 @@ def api_add():
     data = request.get_json(force=True, silent=True) or {}
     dry = bool(data.get("dry_run", True))
     new = apply_fields({"mode": "like"}, data)
+    require_tracks(new["reference"])
     args = ["make_like_playlist.py", new["reference"], "--name", new["name"],
             "--per-artist", str(new["per_artist"]), "--max", str(new["target"])]
     if new["genres"]:
@@ -526,7 +581,13 @@ PAGE = r"""<!doctype html>
   .picker li { padding:5px 6px; border-radius:5px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   .picker li:hover { background:#2a2a2a; }
   .picker li small { color:var(--muted); white-space:nowrap; }
-  @media (max-width:600px) { .cards { grid-template-columns:1fr; } .grid { grid-template-columns:1fr; } }
+  .gcheck { grid-column: 2; color:var(--muted); font-size:12px; margin-top:-2px; }
+  .gcheck:empty { display:none; }
+  .gcheck .err { color:var(--red); }
+  .gcheck .chips { margin-top:3px; }
+  button.chip { background:#2a2a2a; color:var(--fg); border:1px solid var(--line); border-radius:12px; padding:1px 8px; margin:2px 4px 0 0; font:inherit; font-size:12px; cursor:pointer; }
+  button.chip:hover { border-color:var(--green); }
+  @media (max-width:600px) { .cards { grid-template-columns:1fr; } .grid { grid-template-columns:1fr; } .refname, .gcheck { grid-column:auto; } }
 </style></head>
 <body>
 <header>
@@ -552,7 +613,8 @@ PAGE = r"""<!doctype html>
         <label>Reference playlist</label><div class="refrow"><input type="text" id="add-reference" placeholder="pick one with Find, or paste a Spotify link"><button class="act" type="button" id="add-find">Find</button></div>
         <div class="refname" id="add-refname"></div>
         <label>Name</label><input type="text" id="add-name" placeholder="Lo-fi Study (auto)">
-        <label>Genres</label><input type="text" id="add-genres" placeholder="lo-fi,chillhop,jazz  (empty = no genre filter)">
+        <label>Genres</label><div class="refrow"><input type="text" id="add-genres" placeholder="lo-fi,chillhop,jazz  (empty = no genre filter)"><button class="act" type="button" id="add-genrecheck">Check genres</button></div>
+        <div class="gcheck" id="add-gcheck"></div>
         <label>Filter seeds</label><input type="checkbox" id="add-filter_seeds" checked>
         <label>Per artist</label><input type="number" id="add-per_artist" value="3" min="1" max="10">
         <label>Target size</label><input type="number" id="add-target" value="150" min="1">
@@ -644,6 +706,39 @@ function attachPicker(input, label, findBtn) {
   showRefName(input, label);
 }
 
+// Genre check: how many reference tracks each genre word keeps, plus the reference's common tags as
+// chips that append the tag to the field. Catches words no artist carries (e.g. "chillhiphop").
+function attachGenreCheck(refInput, genresInput, btn, out) {
+  const addWord = (w) => {
+    const cur = genresInput.value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (!cur.includes(w)) cur.push(w);
+    genresInput.value = cur.join(',');
+  };
+  btn.onclick = async () => {
+    const id = (refInput.value.match(/[A-Za-z0-9]{22}/) || [])[0];
+    if (!id) { out.replaceChildren(el('span', {class:'err', text:'pick a reference playlist first'})); return; }
+    out.replaceChildren(el('span', {text:'checking the reference’s artists…'}));
+    btn.disabled = true;
+    try {
+      const r = await api('GET', `/api/spotify/genres/${id}?words=` + encodeURIComponent(genresInput.value));
+      out.replaceChildren(el('div', {text: `${r.name}: ${r.seeds} tracks read` + (r.untagged ? `, ${r.untagged} with no genre tags at all` : '')}));
+      if (r.words.length) {
+        const parts = r.words.map(w => `${w.word}: ${w.tracks} track${w.tracks === 1 ? '' : 's'}` + (w.tracks ? '' : ' (no artist has this tag)'));
+        out.append(el('div', {class: r.words.some(w => !w.tracks) ? 'err' : '', text: parts.join(', ')}));
+      } else {
+        out.append(el('div', {text:'no genre words to check (empty = no filter)'}));
+      }
+      if (r.top.length) {
+        const chips = el('div', {class:'chips'}, el('span', {text:'common tags here (click to add): '}));
+        for (const t of r.top) chips.append(el('button', {type:'button', class:'chip', text:`${t.genre} (${t.tracks})`,
+          title:'add this word to Genres', onclick: () => addWord(t.genre)}));
+        out.append(chips);
+      }
+    } catch (e) { out.replaceChildren(el('span', {class:'err', text: e.message})); }
+    btn.disabled = false;
+  };
+}
+
 // ---- tabs
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
@@ -671,7 +766,10 @@ function card(p, st) {
     const refLbl = el('div', {class:'refname'}), refBtn = el('button', {class:'act', text:'Find', type:'button'});
     rows.push(...field('Reference', el('div', {class:'refrow'}, refIn, refBtn)), refLbl);
     attachPicker(refIn, refLbl, refBtn);
-    rows.push(...field('Genres', inp('genres', 'text', p.genres, {placeholder:'comma words; empty = no filter'})));
+    const genIn = inp('genres', 'text', p.genres, {placeholder:'comma words; empty = no filter'});
+    const genOut = el('div', {class:'gcheck'}), genBtn = el('button', {class:'act', text:'Check genres', type:'button'});
+    rows.push(...field('Genres', el('div', {class:'refrow'}, genIn, genBtn)), genOut);
+    attachGenreCheck(refIn, genIn, genBtn, genOut);
     f.filter_seeds = el('input', {type:'checkbox', checked: !!p.filter_seeds});
     rows.push(...field('Filter seeds', f.filter_seeds));
     rows.push(...field('Per artist', inp('per_artist', 'number', p.per_artist ?? 3, {min:1, max:10})));
@@ -802,6 +900,7 @@ async function pollJob() {
 
 // ---- boot
 attachPicker($('#add-reference'), $('#add-refname'), $('#add-find'));
+attachGenreCheck($('#add-reference'), $('#add-genres'), $('#add-genrecheck'), $('#add-gcheck'));
 (async () => {
   await loadPlaylists();
   try { const r = await api('GET', '/api/job'); if (r.job) { jobRunning = r.job.running; showJob(r.job); } } catch (e) {}

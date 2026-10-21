@@ -95,7 +95,10 @@ What it does:
   queries instead). The reference has a *Find* button that lists your own
   playlists and searches all of Spotify by name, so you never need the id; a
   pasted Spotify link also works. The reference playlist's name is shown under
-  the field. *Save*
+  the field. A reference with 0 tracks is refused on *Save*, *Preview* and
+  *Create* (it would only ever yield an empty playlist). *Check genres* under
+  the Genres field shows how many reference tracks each word matches and the
+  reference's most common tags as chips you can click to add. *Save*
   validates and rewrites `playlists.json` atomically. *Preview* runs
   `refresh_playlists.py --dry-run --only <id>` and shows the output; *Run now*
   runs it for real; *Remove from refresher* deletes the entry only (the Spotify
