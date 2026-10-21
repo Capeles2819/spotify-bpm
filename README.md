@@ -90,14 +90,17 @@ to the internet.
 
 What it does:
 
-- **Playlists** tab: one card per entry with editable name, reference (paste a
-  Spotify URL, it is normalised to the id), genres, filter seeds, per-artist and
-  target size (BPM entries show min, max and search queries instead). *Save*
+- **Playlists** tab: one card per entry with editable name, reference, genres,
+  filter seeds, per-artist and target size (BPM entries show min, max and search
+  queries instead). The reference has a *Find* button that lists your own
+  playlists and searches all of Spotify by name, so you never need the id; a
+  pasted Spotify link also works. The reference playlist's name is shown under
+  the field. *Save*
   validates and rewrites `playlists.json` atomically. *Preview* runs
   `refresh_playlists.py --dry-run --only <id>` and shows the output; *Run now*
   runs it for real; *Remove from refresher* deletes the entry only (the Spotify
   playlist is untouched).
-- **Add playlist** tab: reference URL, name, genres and options. *Preview* runs
+- **Add playlist** tab: reference (same *Find* picker), name, genres and options. *Preview* runs
   `make_like_playlist.py --dry-run`; *Create* makes the playlist on Spotify and
   appends it to `playlists.json`.
 - **Rejected songs** tab: the tracks you removed (remembered in `state.json`),

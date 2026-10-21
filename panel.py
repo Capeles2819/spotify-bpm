@@ -24,11 +24,16 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request
 
-from make_like_playlist import playlist_id_from  # noqa: E402
+from find_high_tempo import API, load_env  # noqa: E402
+from make_like_playlist import playlist_id_from, reference_tracks_embed  # noqa: E402
+from make_playlist import TOKEN_FILE, _refresh  # noqa: E402
+
+import requests  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("PANEL_DIR", HERE)).resolve()
@@ -206,6 +211,62 @@ def _run_job(job):
     job.rc = rc  # set last: this is what flips "running" to false
 
 
+# ---------------------------------------------------------------- spotify lookups
+
+class NoToken(RuntimeError):
+    pass
+
+
+def access_token():
+    """Like make_playlist.user_token() but never falls back to the browser login
+    (the Pi has no browser; that path would hang the panel)."""
+    if not TOKEN_FILE.exists():
+        raise NoToken("no .spotify_token.json on this machine")
+    with FILE_LOCK:
+        tok = json.loads(TOKEN_FILE.read_text())
+        if tok.get("expires_at", 0) > time.time():
+            return tok["access_token"]
+        tok = _refresh(os.environ["SPOTIFY_CLIENT_ID"], tok)
+    if not tok:
+        raise NoToken("Spotify token expired and could not be refreshed; log in again with make_playlist.py on the PC")
+    return tok["access_token"]
+
+
+def spotify():
+    if job_running():
+        raise Busy("a script is running; Spotify lookups wait until it finishes")
+    s = requests.Session()
+    s.headers["Authorization"] = f"Bearer {access_token()}"
+    return s
+
+
+def pl_summary(p):
+    return {"id": p["id"], "name": p["name"], "owner": (p.get("owner") or {}).get("display_name", ""),
+            "tracks": (p.get("tracks") or {}).get("total"), "url": f"https://open.spotify.com/playlist/{p['id']}"}
+
+
+NAME_CACHE = {}
+
+
+def playlist_info(pid):
+    """Name/owner/size for a playlist id. Spotify-made mixes 404 on the API, so fall back
+    to the public embed page (name + first ~50 tracks)."""
+    if pid in NAME_CACHE:
+        return NAME_CACHE[pid]
+    r = spotify().get(f"{API}/playlists/{pid}", params={"fields": "id,name,owner(display_name),tracks.total"}, timeout=15)
+    if r.status_code == 200:
+        info = pl_summary(r.json())
+    else:
+        try:
+            name, _tracks = reference_tracks_embed(pid)
+            info = {"id": pid, "name": name, "owner": "Spotify", "tracks": None,
+                    "url": f"https://open.spotify.com/playlist/{pid}"}
+        except Exception:  # noqa: BLE001
+            raise Invalid(f"playlist {pid} not found on Spotify (deleted or made private?)")
+    NAME_CACHE[pid] = info
+    return info
+
+
 # ---------------------------------------------------------------- API
 
 def ok(**kw):
@@ -224,6 +285,43 @@ def _invalid(e):
 @app.errorhandler(Busy)
 def _busy(e):
     return fail(e, 409)
+
+
+@app.errorhandler(NoToken)
+def _notoken(e):
+    return fail(e, 503)
+
+
+@app.errorhandler(requests.RequestException)
+def _spotify_err(e):
+    return fail(f"Spotify request failed: {e}", 502)
+
+
+@app.get("/api/spotify/playlist/<pid>")
+def api_spotify_playlist(pid):
+    if not ID_RE.match(pid):
+        raise Invalid("bad playlist id")
+    return ok(playlist=playlist_info(pid))
+
+
+@app.get("/api/spotify/search")
+def api_spotify_search():
+    q = request.args.get("q", "").strip()
+    s = spotify()
+    if q:
+        r = s.get(f"{API}/search", params={"q": q, "type": "playlist", "limit": 15}, timeout=15)
+        r.raise_for_status()
+        items = r.json()["playlists"]["items"]
+        source = "search"
+    else:
+        r = s.get(f"{API}/me/playlists", params={"limit": 50}, timeout=15)
+        r.raise_for_status()
+        items = r.json()["items"]
+        source = "mine"
+    out = [pl_summary(p) for p in items if p and p.get("id")]
+    for p in out:
+        NAME_CACHE.setdefault(p["id"], p)
+    return ok(playlists=out, source=source)
 
 
 @app.get("/api/config")
@@ -419,6 +517,15 @@ PAGE = r"""<!doctype html>
   .rej ul { list-style:none; padding:0; margin:0; }
   .rej li { display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px solid var(--line); }
   .note { color:var(--muted); font-size:13px; }
+  .refrow { display:flex; gap:6px; }
+  .refrow input { flex:1; }
+  .refname { grid-column: 2; color:var(--muted); font-size:12px; margin-top:-2px; }
+  .picker { grid-column: 1 / -1; background:#111; border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .picker input { margin-bottom:6px; }
+  .picker ul { list-style:none; margin:0; padding:0; max-height:220px; overflow:auto; }
+  .picker li { padding:5px 6px; border-radius:5px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  .picker li:hover { background:#2a2a2a; }
+  .picker li small { color:var(--muted); white-space:nowrap; }
   @media (max-width:600px) { .cards { grid-template-columns:1fr; } .grid { grid-template-columns:1fr; } }
 </style></head>
 <body>
@@ -440,9 +547,10 @@ PAGE = r"""<!doctype html>
   <section class="tab" id="tab-add">
     <div class="card" style="max-width:560px">
       <h3>New "sounds like" playlist</h3>
-      <p class="note">Creates a private playlist on your Spotify account from a reference playlist (its tracks plus each artist's top tracks, filtered by genre) and adds it to the refresher. Use Preview first; it changes nothing.</p>
+      <p class="note">Creates a private playlist on your Spotify account from a reference playlist (its tracks plus each artist's top tracks, filtered by genre) and adds it to the refresher. Click <b>Find</b> to pick the reference from your own playlists or search Spotify by name. Use Preview first; it changes nothing.</p>
       <div class="grid">
-        <label>Reference URL</label><input type="text" id="add-reference" placeholder="https://open.spotify.com/playlist/...">
+        <label>Reference playlist</label><div class="refrow"><input type="text" id="add-reference" placeholder="pick one with Find, or paste a Spotify link"><button class="act" type="button" id="add-find">Find</button></div>
+        <div class="refname" id="add-refname"></div>
         <label>Name</label><input type="text" id="add-name" placeholder="Lo-fi Study (auto)">
         <label>Genres</label><input type="text" id="add-genres" placeholder="lo-fi,chillhop,jazz  (empty = no genre filter)">
         <label>Filter seeds</label><input type="checkbox" id="add-filter_seeds" checked>
@@ -501,6 +609,41 @@ async function api(method, url, body) {
 }
 function say(node, text, bad) { node.textContent = text; node.className = 'msg ' + (bad ? 'err' : 'okk'); }
 
+// Reference playlist picker: shows your playlists, or Spotify search results as you type.
+function describe(p) { return `${p.name} \u2014 ${p.owner || '?'}${p.tracks != null ? ', ' + p.tracks + ' tracks' : ''}`; }
+async function showRefName(input, label) {
+  const id = (input.value.match(/[A-Za-z0-9]{22}/) || [])[0];
+  if (!id) { label.textContent = ''; return; }
+  label.textContent = 'looking up\u2026';
+  try { const r = await api('GET', `/api/spotify/playlist/${id}`); label.textContent = describe(r.playlist); }
+  catch (e) { label.textContent = e.message; }
+}
+function attachPicker(input, label, findBtn) {
+  let box = null, timer = null;
+  const close = () => { if (box) { box.remove(); box = null; } };
+  const load = async (q) => {
+    const ul = box.querySelector('ul'); ul.replaceChildren(el('li', {text: q ? 'searching\u2026' : 'loading your playlists\u2026'}));
+    try {
+      const r = await api('GET', '/api/spotify/search?q=' + encodeURIComponent(q));
+      if (!box) return;
+      ul.replaceChildren();
+      if (!r.playlists.length) ul.append(el('li', {text: 'nothing found'}));
+      for (const p of r.playlists) ul.append(el('li', {onclick: () => { input.value = p.id; label.textContent = describe(p); close(); }},
+        el('span', {text: p.name}), el('small', {text: (p.owner || '') + (p.tracks != null ? ' \u00b7 ' + p.tracks : '')})));
+      box.querySelector('.src').textContent = r.source === 'mine' ? 'Your playlists. Type a name to search all of Spotify.' : 'Spotify search results';
+    } catch (e) { ul.replaceChildren(el('li', {text: e.message})); }
+  };
+  findBtn.onclick = () => {
+    if (box) { close(); return; }
+    const q = el('input', {type:'text', placeholder:'playlist name\u2026'});
+    q.oninput = () => { clearTimeout(timer); timer = setTimeout(() => load(q.value.trim()), 400); };
+    box = el('div', {class:'picker'}, q, el('div', {class:'note src'}), el('ul'));
+    label.after(box); q.focus(); load('');
+  };
+  input.addEventListener('change', () => showRefName(input, label));
+  showRefName(input, label);
+}
+
 // ---- tabs
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
@@ -524,7 +667,10 @@ function card(p, st) {
     f.queries = el('textarea', {text: (p.queries || []).join('\n')});
     rows.push(...field('Searches (one per line)', f.queries));
   } else {
-    rows.push(...field('Reference', inp('reference', 'text', p.reference, {placeholder:'Spotify playlist URL or id'})));
+    const refIn = inp('reference', 'text', p.reference, {placeholder:'pick with Find, or paste a Spotify link'});
+    const refLbl = el('div', {class:'refname'}), refBtn = el('button', {class:'act', text:'Find', type:'button'});
+    rows.push(...field('Reference', el('div', {class:'refrow'}, refIn, refBtn)), refLbl);
+    attachPicker(refIn, refLbl, refBtn);
     rows.push(...field('Genres', inp('genres', 'text', p.genres, {placeholder:'comma words; empty = no filter'})));
     f.filter_seeds = el('input', {type:'checkbox', checked: !!p.filter_seeds});
     rows.push(...field('Filter seeds', f.filter_seeds));
@@ -655,6 +801,7 @@ async function pollJob() {
 }
 
 // ---- boot
+attachPicker($('#add-reference'), $('#add-refname'), $('#add-find'));
 (async () => {
   await loadPlaylists();
   try { const r = await api('GET', '/api/job'); if (r.job) { jobRunning = r.job.running; showJob(r.job); } } catch (e) {}
@@ -665,5 +812,6 @@ async function pollJob() {
 
 
 if __name__ == "__main__":
+    load_env()
     print(f"panel: files in {DATA_DIR}; scripts run from {HERE}; listening on http://{HOST}:{PORT}", flush=True)
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
